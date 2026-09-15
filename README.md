@@ -1,16 +1,21 @@
-# FCN Monitor 3.0
-可部署的 FCN 客戶／多筆產品管理版。
+# FCN Monitor 3.2
+客戶 × 商品代號 × 最多三檔連結標的的 Streamlit FCN 監控。
 
-## 已包含
-- 客戶名稱與一位客戶多筆 FCN
-- FCN 新增、編輯、刪除
-- Strike / KI / KO / 本金 / 票息 / 日期
-- 持有中、KO 出場、到期現金贖回、到期接股
-- 距 KI / Strike / KO、到期倒數
-- KI 曾觸及欄位
-- 客戶視角總覽
-- SQLite 持久化資料
+功能：
+- 一客戶多筆 FCN
+- 商品代號
+- 最多 3 檔連結標的
+- 每檔獨立期初價、Strike、KI、KO、目前價格
+- WORST-OF
+- KI / 接近 KI / KO 提示
+- 到期倒數
+- 客戶 / 商品 / 標的搜尋
+- SQLite 資料庫
 
-## Railway
-將 `app.py`、`requirements.txt`、`Dockerfile` 上傳到 GitHub，Railway 從 GitHub repo 部署即可。
-部署成功後，在「服務 → 設定 → 網路 → 公共網路 → 生成域」產生公開網址。
+Railway：
+1. 用本 ZIP 內四個檔案取代 GitHub repo 的 app.py、requirements.txt、Dockerfile、README.md。
+2. Commit / Push。
+3. Railway 會自動部署。
+4. 建議建立 Volume，Mount Path：/app/data，保存 SQLite 資料。
+
+注意：目前價格是手動輸入。正式 KI 是否觸發，仍應以每檔 FCN 的正式 Term Sheet（盤中、收盤或指定觀察時點）為準。

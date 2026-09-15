@@ -1,158 +1,266 @@
-import sqlite3
-from datetime import date, datetime
 import streamlit as st
-import pandas as pd
+import sqlite3, json
+from pathlib import Path
+from datetime import date, datetime
 
-DB="fcn_monitor.db"
-st.set_page_config(page_title="FCN Monitor 3.0", page_icon="📊", layout="wide")
+st.set_page_config(page_title="FCN Monitor 3.2", page_icon="📊", layout="wide")
+DB = Path("data/fcn_monitor.db")
+DB.parent.mkdir(parents=True, exist_ok=True)
 
-def conn():
-    c=sqlite3.connect(DB, check_same_thread=False)
-    c.row_factory=sqlite3.Row
+def get_db():
+    c = sqlite3.connect(DB)
+    c.row_factory = sqlite3.Row
     return c
 
-def init():
-    c=conn()
-    c.execute("""CREATE TABLE IF NOT EXISTS fcn(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      client TEXT NOT NULL, symbol TEXT NOT NULL, principal REAL DEFAULT 0,
-      strike REAL DEFAULT 0, ki REAL DEFAULT 0, ko REAL DEFAULT 0,
-      coupon REAL DEFAULT 0, trade_date TEXT, maturity_date TEXT,
-      next_obs TEXT, final_obs TEXT, current_price REAL DEFAULT 0,
-      status TEXT DEFAULT '持有中', exit_type TEXT DEFAULT '',
-      ki_touched INTEGER DEFAULT 0, notes TEXT DEFAULT ''
+def init_db():
+    c = get_db()
+    c.execute("""CREATE TABLE IF NOT EXISTS fcn (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        product_code TEXT,
+        client_name TEXT NOT NULL,
+        principal REAL DEFAULT 0,
+        coupon REAL DEFAULT 0,
+        trade_date TEXT,
+        maturity_date TEXT,
+        first_obs_date TEXT,
+        final_obs_date TEXT,
+        underlyings TEXT DEFAULT '[]',
+        status TEXT DEFAULT '持有中',
+        settlement TEXT DEFAULT '',
+        notes TEXT DEFAULT '',
+        created_at TEXT
     )""")
-    c.commit(); c.close()
+    c.commit()
+    c.close()
 
-def all_rows():
-    c=conn(); rows=[dict(x) for x in c.execute("SELECT * FROM fcn ORDER BY id DESC")]; c.close()
+def load_rows():
+    c = get_db()
+    rows = c.execute("SELECT * FROM fcn ORDER BY maturity_date, id").fetchall()
+    c.close()
     return rows
 
-def add(v):
-    c=conn(); c.execute("""INSERT INTO fcn
-    (client,symbol,principal,strike,ki,ko,coupon,trade_date,maturity_date,next_obs,final_obs,current_price,status,exit_type,ki_touched,notes)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",v); c.commit(); c.close()
+def parse_us(raw):
+    try:
+        x = json.loads(raw or "[]")
+        return x if isinstance(x, list) else []
+    except Exception:
+        return []
 
-def update(fid,v):
-    c=conn(); c.execute("""UPDATE fcn SET
-    client=?,symbol=?,principal=?,strike=?,ki=?,ko=?,coupon=?,trade_date=?,maturity_date=?,next_obs=?,final_obs=?,current_price=?,status=?,exit_type=?,ki_touched=?,notes=?
-    WHERE id=?""",(*v,fid)); c.commit(); c.close()
+def risk_level(u):
+    cur = float(u.get("current") or 0)
+    ki = float(u.get("ki") or 0)
+    ko = float(u.get("ko") or 0)
+    if cur <= 0:
+        return 0, "⚪ 未填現價"
+    if ko > 0 and cur >= ko:
+        return 1, "🟢 KO達標"
+    if ki > 0 and cur <= ki:
+        return 3, "🔴 KI以下"
+    if ki > 0 and cur <= ki * 1.10:
+        return 2, "🟠 接近KI"
+    return 0, "🟢 正常"
 
-def delete(fid):
-    c=conn(); c.execute("DELETE FROM fcn WHERE id=?",(fid,)); c.commit(); c.close()
+def worst_of(items):
+    valid = [u for u in items if float(u.get("current") or 0) > 0 and float(u.get("ki") or 0) > 0]
+    return min(valid, key=lambda u: float(u["current"]) / float(u["ki"])) if valid else None
 
-def risk(row):
-    if row["status"]!="持有中": return "已出場"
-    p=float(row["current_price"] or 0); ki=float(row["ki"] or 0)
-    if not p or not ki: return "⚪ 未設定價格"
-    d=(p/ki-1)*100
-    return "🔴 高風險" if d<=5 else ("🟠 注意" if d<=15 else "🟢 正常")
+def days_left(s):
+    try:
+        return (date.fromisoformat(s) - date.today()).days
+    except Exception:
+        return None
 
-def dist(p,t):
-    return (p/t-1)*100 if p and t else None
+init_db()
+st.title("📊 FCN Monitor 3.2")
+st.caption("客戶 × 商品代號 × 最多三檔連結標的｜WORST-OF 監控")
 
-init()
-st.markdown("## 📊 FCN Monitor 3.0")
-st.caption("客戶 × 多筆 FCN｜持有／KO／接股｜KI・Strike・KO 監控")
+page = st.sidebar.radio("功能", ["總覽", "新增 FCN", "編輯 FCN", "客戶 / 商品"])
+query = st.sidebar.text_input("搜尋客戶 / 商品代號 / 標的", "")
 
-rows=all_rows()
-df=pd.DataFrame(rows)
+rows = load_rows()
+if query:
+    q = query.lower()
+    rows = [r for r in rows if q in (
+        (r["client_name"] or "") + " " + (r["product_code"] or "") + " " +
+        " ".join(u.get("symbol","") for u in parse_us(r["underlyings"]))
+    ).lower()]
 
-if len(df):
-    today=date.today()
-    days=[]
-    for x in df["maturity_date"]:
-        try: days.append((date.fromisoformat(x)-today).days)
-        except: days.append(None)
-    df["days_to_maturity"]=days
-    df["risk"]=df.apply(risk,axis=1)
-    c1,c2,c3,c4,c5=st.columns(5)
-    c1.metric("客戶",df.client.nunique())
-    c2.metric("FCN",len(df))
-    c3.metric("持有中",int((df.status=="持有中").sum()))
-    c4.metric("高風險",int((df.risk=="🔴 高風險").sum()))
-    c5.metric("7天內到期",int(((df.days_to_maturity>=0)&(df.days_to_maturity<=7)).sum()))
-else:
-    st.info("尚無資料。請在「＋ 新增 FCN」建立第一筆。")
+if page == "總覽":
+    client_count = len(set(r["client_name"] for r in rows))
+    near = high = expiring = 0
+    for r in rows:
+        items = parse_us(r["underlyings"])
+        levels = [risk_level(u)[0] for u in items]
+        level = max(levels or [0])
+        near += level == 2
+        high += level == 3
+        d = days_left(r["maturity_date"])
+        expiring += d is not None and 0 <= d <= 7
 
-tab1,tab2,tab3=st.tabs(["📋 FCN 總覽","👤 客戶視角","＋ 新增 FCN"])
+    a,b,c,d,e = st.columns(5)
+    a.metric("客戶", client_count)
+    b.metric("FCN", len(rows))
+    c.metric("正常", max(0, len(rows)-near-high))
+    d.metric("接近 / 高風險", f"{near} / {high}")
+    e.metric("7天內到期", expiring)
+    st.divider()
 
-with tab1:
-    if len(df):
-        a,b,c=st.columns([1.3,1,1])
-        client_filter=a.selectbox("客戶",["全部"]+sorted(df.client.unique()))
-        status_filter=b.selectbox("產品狀態",["全部","持有中","KO 出場","到期現金贖回","到期接股","其他"])
-        q=c.text_input("搜尋標的",placeholder="QCOM / NVDA")
-        v=df.copy()
-        if client_filter!="全部": v=v[v.client==client_filter]
-        if status_filter!="全部": v=v[v.status==status_filter]
-        if q: v=v[v.symbol.str.contains(q.upper(),na=False)]
-        st.caption(f"顯示 {len(v)} 筆")
-        for _,r in v.iterrows():
-            p=float(r.current_price or 0)
-            kd=dist(p,float(r.ki or 0)); sd=dist(p,float(r.strike or 0)); cod=dist(p,float(r.ko or 0))
-            with st.container(border=True):
-                h1,h2,h3,h4,h5=st.columns([2.2,1,1,1,1])
-                h1.markdown(f"### {r.client} · {r.symbol}")
-                h2.metric("現價",f"{p:.2f}")
-                h3.metric("距 KI",f"{kd:.1f}%" if kd is not None else "-")
-                h4.metric("距 Strike",f"{sd:.1f}%" if sd is not None else "-")
-                h5.metric("距 KO",f"{cod:.1f}%" if cod is not None else "-")
-                st.write(f"**{r.risk}**　｜　{r.status}　｜　到期：{r.maturity_date}　｜　剩餘：{r.days_to_maturity} 天")
-                st.caption(f"本金 {r.principal:,.0f}｜Strike {r.strike:.2f}｜KI {r.ki:.2f}｜KO {r.ko:.2f}｜年化票息 {r.coupon:.2f}%")
-                st.caption(f"下一比較日 {r.next_obs}｜最終比較日 {r.final_obs}｜KI曾觸及：{'是' if r.ki_touched else '否'}")
-                if r.notes: st.caption("備註："+r.notes)
-                e1,e2=st.columns(2)
-                if e1.button("編輯",key=f"edit{int(r.id)}"):
-                    st.session_state["edit_id"]=int(r.id)
-                if e2.button("刪除",key=f"del{int(r.id)}"):
-                    delete(int(r.id)); st.rerun()
+    if not rows:
+        st.info("目前沒有 FCN，請從「新增 FCN」開始。")
 
-with tab2:
-    if len(df):
-        client=st.selectbox("選擇客戶",sorted(df.client.unique()),key="client_view")
-        v=df[df.client==client]
-        st.markdown(f"### {client} 的 FCN")
-        st.write(f"共 **{len(v)} 筆**，持有中 **{int((v.status=='持有中').sum())} 筆**")
-        show=v[["symbol","principal","current_price","strike","ki","ko","coupon","maturity_date","status","risk"]].copy()
-        show.columns=["標的","本金","現價","Strike","KI","KO","年化票息%","到期日","狀態","風險"]
-        st.dataframe(show,use_container_width=True,hide_index=True)
-    else: st.info("尚無客戶資料。")
+    for r in rows:
+        items = parse_us(r["underlyings"])
+        levels = [risk_level(u)[0] for u in items]
+        level = max(levels or [0])
+        badge = "🔴" if level == 3 else "🟠" if level == 2 else "🟢"
+        w = worst_of(items)
+        d = days_left(r["maturity_date"])
+        st.markdown(f"### {badge} {r['client_name']} ｜ `{r['product_code'] or '-'}`")
+        x,y,z,t = st.columns(4)
+        x.write(f"**本金**\n{r['principal']:,.0f}")
+        y.write(f"**年化票息**\n{r['coupon']:.2f}%")
+        z.write(f"**到期**\n{r['maturity_date'] or '-'}\n剩 {d if d is not None else '-'} 天")
+        t.write(f"**WORST-OF**\n{w.get('symbol') if w else '-'}")
+        if w:
+            ratio = float(w["current"]) / float(w["ki"]) * 100 if float(w["ki"]) else 0
+            st.caption(f"WORST-OF {w['symbol']}｜KI位置 {ratio:.2f}%")
+        st.caption(" ｜ ".join(
+            f"{u.get('symbol','-')}: 現價 {u.get('current') or '-'} / Strike {u.get('strike') or '-'} / KI {u.get('ki') or '-'} / KO {u.get('ko') or '-'}"
+            for u in items
+        ))
+        st.divider()
 
-with tab3:
-    edit_id=st.session_state.get("edit_id")
-    existing=next((x for x in rows if x["id"]==edit_id),None)
-    title="編輯 FCN" if existing else "新增 FCN"
-    st.subheader(title)
-    with st.form("fcn_form"):
-        c1,c2=st.columns(2)
-        client=c1.text_input("客戶名稱 *",value=existing["client"] if existing else "")
-        symbol=c2.text_input("標的 *",value=existing["symbol"] if existing else "",placeholder="QCOM")
-        c3,c4,c5=st.columns(3)
-        principal=c3.number_input("本金",min_value=0.0,value=float(existing["principal"]) if existing else 100000.0,step=1000.0)
-        strike=c4.number_input("Strike",min_value=0.0,value=float(existing["strike"]) if existing else 0.0,step=0.01)
-        ki=c5.number_input("KI",min_value=0.0,value=float(existing["ki"]) if existing else 0.0,step=0.01)
-        c6,c7,c8=st.columns(3)
-        ko=c6.number_input("KO",min_value=0.0,value=float(existing["ko"]) if existing else 0.0,step=0.01)
-        coupon=c7.number_input("年化票息 %",min_value=0.0,value=float(existing["coupon"]) if existing else 0.0,step=0.01)
-        price=c8.number_input("目前價格",min_value=0.0,value=float(existing["current_price"]) if existing else 0.0,step=0.01)
-        c9,c10,c11,c12=st.columns(4)
-        trade=c9.date_input("交易日",value=date.fromisoformat(existing["trade_date"]) if existing and existing["trade_date"] else date.today())
-        maturity=c10.date_input("到期日",value=date.fromisoformat(existing["maturity_date"]) if existing and existing["maturity_date"] else date.today())
-        next_obs=c11.date_input("下一比較日",value=date.fromisoformat(existing["next_obs"]) if existing and existing["next_obs"] else date.today())
-        final_obs=c12.date_input("最終比較日",value=date.fromisoformat(existing["final_obs"]) if existing and existing["final_obs"] else date.today())
-        status=st.selectbox("產品狀態",["持有中","KO 出場","到期現金贖回","到期接股","其他"],index=["持有中","KO 出場","到期現金贖回","到期接股","其他"].index(existing["status"]) if existing else 0)
-        ki_touched=st.checkbox("KI 曾被觸及（依產品條款確認）",value=bool(existing["ki_touched"]) if existing else False)
-        notes=st.text_area("備註",value=existing["notes"] if existing else "")
-        submitted=st.form_submit_button("儲存")
+elif page == "新增 FCN":
+    st.subheader("➕ 新增 FCN")
+    with st.form("new_fcn"):
+        a,b = st.columns(2)
+        client = a.text_input("客戶名稱 *")
+        code = b.text_input("商品代號 *", placeholder="例如 FCN202609001")
+
+        a,b,c = st.columns(3)
+        principal = a.number_input("本金", min_value=0.0, step=1000.0)
+        coupon = b.number_input("年化票息 (%)", min_value=0.0, step=0.01)
+        status = c.selectbox("狀態", ["持有中","KO 出場","到期現金贖回","到期接股","其他"])
+
+        a,b,c,d = st.columns(4)
+        td = a.date_input("交易日", date.today())
+        md = b.date_input("到期日", date.today())
+        fo = c.date_input("首次比價日", date.today())
+        final = d.date_input("最後觀察日", date.today())
+
+        settlement = st.text_input("結算方式", placeholder="現金贖回 / 實物交割 / 依條款")
+        notes = st.text_area("備註 / 條款提醒")
+
+        items = []
+        st.markdown("### 🔗 連結標的（最多 3 檔）")
+        for i in range(3):
+            st.markdown(f"**標的 {i+1}**")
+            a,b,c,d,e = st.columns(5)
+            sym = a.text_input("代號", key=f"n_sym_{i}")
+            initial = b.number_input("期初價", min_value=0.0, step=0.01, key=f"n_initial_{i}")
+            strike = c.number_input("Strike", min_value=0.0, step=0.01, key=f"n_strike_{i}")
+            ki = d.number_input("KI", min_value=0.0, step=0.01, key=f"n_ki_{i}")
+            ko = e.number_input("KO", min_value=0.0, step=0.01, key=f"n_ko_{i}")
+            current = st.number_input("目前價格", min_value=0.0, step=0.01, key=f"n_current_{i}")
+            if sym.strip():
+                items.append({"symbol":sym.strip().upper(),"initial":initial,"strike":strike,"ki":ki,"ko":ko,"current":current})
+
+        submitted = st.form_submit_button("💾 儲存 FCN", type="primary")
+
+    if submitted:
+        if not client.strip() or not code.strip():
+            st.error("客戶名稱與商品代號必填。")
+        else:
+            c = get_db()
+            c.execute("""INSERT INTO fcn
+                (product_code,client_name,principal,coupon,trade_date,maturity_date,
+                 first_obs_date,final_obs_date,underlyings,status,settlement,notes,created_at)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (code.strip(), client.strip(), principal, coupon, str(td), str(md), str(fo), str(final),
+                 json.dumps(items, ensure_ascii=False), status, settlement, notes,
+                 datetime.now().isoformat(timespec="seconds")))
+            c.commit(); c.close()
+            st.success("FCN 已新增。")
+            st.rerun()
+
+elif page == "編輯 FCN":
+    st.subheader("✏️ 編輯 FCN")
+    if not rows:
+        st.info("沒有符合條件的 FCN。")
+    else:
+        mapping = {f"{r['client_name']}｜{r['product_code'] or '-'}｜#{r['id']}":r for r in rows}
+        selected = st.selectbox("選擇商品", list(mapping))
+        r = mapping[selected]
+        old = parse_us(r["underlyings"]) + [{}] * 3
+
+        def parse_date(s):
+            try: return date.fromisoformat(s)
+            except Exception: return date.today()
+
+        with st.form("edit_fcn"):
+            a,b = st.columns(2)
+            client = a.text_input("客戶名稱 *", r["client_name"])
+            code = b.text_input("商品代號 *", r["product_code"] or "")
+            a,b,c = st.columns(3)
+            principal = a.number_input("本金", min_value=0.0, value=float(r["principal"] or 0), step=1000.0)
+            coupon = b.number_input("年化票息 (%)", min_value=0.0, value=float(r["coupon"] or 0), step=0.01)
+            choices = ["持有中","KO 出場","到期現金贖回","到期接股","其他"]
+            status = c.selectbox("狀態", choices, index=choices.index(r["status"]) if r["status"] in choices else 0)
+            a,b,c,d = st.columns(4)
+            td = a.date_input("交易日", parse_date(r["trade_date"]))
+            md = b.date_input("到期日", parse_date(r["maturity_date"]))
+            fo = c.date_input("首次比價日", parse_date(r["first_obs_date"]))
+            final = d.date_input("最後觀察日", parse_date(r["final_obs_date"]))
+            settlement = st.text_input("結算方式", r["settlement"] or "")
+            notes = st.text_area("備註 / 條款提醒", r["notes"] or "")
+
+            items = []
+            st.markdown("### 🔗 連結標的（最多 3 檔）")
+            for i in range(3):
+                u = old[i]
+                a,b,c,d,e = st.columns(5)
+                sym = a.text_input("代號", u.get("symbol",""), key=f"e_sym_{i}")
+                initial = b.number_input("期初價", min_value=0.0, value=float(u.get("initial") or 0), step=0.01, key=f"e_initial_{i}")
+                strike = c.number_input("Strike", min_value=0.0, value=float(u.get("strike") or 0), step=0.01, key=f"e_strike_{i}")
+                ki = d.number_input("KI", min_value=0.0, value=float(u.get("ki") or 0), step=0.01, key=f"e_ki_{i}")
+                ko = e.number_input("KO", min_value=0.0, value=float(u.get("ko") or 0), step=0.01, key=f"e_ko_{i}")
+                current = st.number_input("目前價格", min_value=0.0, value=float(u.get("current") or 0), step=0.01, key=f"e_current_{i}")
+                if sym.strip():
+                    items.append({"symbol":sym.strip().upper(),"initial":initial,"strike":strike,"ki":ki,"ko":ko,"current":current})
+
+            submitted = st.form_submit_button("💾 儲存修改", type="primary")
+
         if submitted:
-            if not client.strip() or not symbol.strip():
-                st.error("請填寫客戶名稱與標的")
-            else:
-                vals=(client.strip(),symbol.strip().upper(),principal,strike,ki,ko,coupon,str(trade),str(maturity),str(next_obs),str(final_obs),price,status,status if status!="持有中" else "",int(ki_touched),notes)
-                if existing: update(edit_id,vals); st.session_state.pop("edit_id",None)
-                else: add(vals)
-                st.success("已儲存"); st.rerun()
+            c = get_db()
+            c.execute("""UPDATE fcn SET product_code=?,client_name=?,principal=?,coupon=?,
+                trade_date=?,maturity_date=?,first_obs_date=?,final_obs_date=?,
+                underlyings=?,status=?,settlement=?,notes=? WHERE id=?""",
+                (code.strip(), client.strip(), principal, coupon, str(td), str(md), str(fo), str(final),
+                 json.dumps(items, ensure_ascii=False), status, settlement, notes, r["id"]))
+            c.commit(); c.close()
+            st.success("已更新。")
+            st.rerun()
 
-st.divider()
-st.caption("FCN Monitor 3.0｜實際 KI/KO、觀察方式與最終結算請以各產品正式條款為準。")
+        if st.button("🗑️ 刪除這筆 FCN"):
+            c = get_db(); c.execute("DELETE FROM fcn WHERE id=?", (r["id"],)); c.commit(); c.close()
+            st.success("已刪除。"); st.rerun()
+
+else:
+    st.subheader("👤 客戶 / 商品")
+    groups = {}
+    for r in rows:
+        groups.setdefault(r["client_name"], []).append(r)
+    if not groups:
+        st.info("尚無資料。")
+    for client, rs in groups.items():
+        with st.expander(f"👤 {client}｜{len(rs)} 筆 FCN", expanded=True):
+            for r in rs:
+                items = parse_us(r["underlyings"])
+                w = worst_of(items)
+                d = days_left(r["maturity_date"])
+                st.markdown(f"**{r['product_code'] or '-'}**｜到期 {r['maturity_date'] or '-'}｜剩 {d if d is not None else '-'} 天")
+                st.write(f"本金 {r['principal']:,.0f}｜票息 {r['coupon']:.2f}%｜狀態 {r['status']}｜WORST-OF {(w or {}).get('symbol','-')}")
+                st.caption("、".join(u.get("symbol","-") for u in items) or "尚未設定標的")
+
+st.sidebar.divider()
+st.sidebar.caption("FCN Monitor 3.2\n最多三檔連結標的｜WORST-OF")
