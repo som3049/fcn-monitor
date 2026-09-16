@@ -1,21 +1,8 @@
-# FCN Monitor 3.2
-客戶 × 商品代號 × 最多三檔連結標的的 Streamlit FCN 監控。
+# FCN Monitor 3.3
+自動行情版。輸入股票代號後，總覽會透過 Yahoo Finance 公開行情介面抓取最新價格；行情快取預設 60 秒，可手動立即更新。
 
-功能：
-- 一客戶多筆 FCN
-- 商品代號
-- 最多 3 檔連結標的
-- 每檔獨立期初價、Strike、KI、KO、目前價格
-- WORST-OF
-- KI / 接近 KI / KO 提示
-- 到期倒數
-- 客戶 / 商品 / 標的搜尋
-- SQLite 資料庫
+功能：客戶、多筆 FCN、商品代號、最多 3 檔標的、各檔獨立期初價/Strike/KI/KO、WORST-OF、KI/KO 風險提示、到期倒數、搜尋。
 
-Railway：
-1. 用本 ZIP 內四個檔案取代 GitHub repo 的 app.py、requirements.txt、Dockerfile、README.md。
-2. Commit / Push。
-3. Railway 會自動部署。
-4. 建議建立 Volume，Mount Path：/app/data，保存 SQLite 資料。
+Railway：將 app.py、requirements.txt、Dockerfile、README.md 放入原 GitHub repo；建議建立 Volume，Mount Path `/app/data` 保存 SQLite。
 
-注意：目前價格是手動輸入。正式 KI 是否觸發，仍應以每檔 FCN 的正式 Term Sheet（盤中、收盤或指定觀察時點）為準。
+注意：公開行情可能延遲、暫停或抓不到。正式 KI/KO 觸發仍以各 FCN Term Sheet 的觀察規則為準；本版是監控用途。
